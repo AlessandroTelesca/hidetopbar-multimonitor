@@ -114,7 +114,9 @@ export class HiddenClock {
         }
         const [sourceX] = source.get_transformed_position();
         const center = this._box.x + this._box.width / 2;
-        this._button.translation_x = Math.round(sourceX + source.width / 2 - center);
+        const offset = Math.round(sourceX + source.width / 2 - center);
+        // NaN before the panel clock is on stage; its allocation comes later.
+        this._button.translation_x = Number.isFinite(offset) ? offset : 0;
     }
 
     // Hides the clock; it comes back after SNOOZE_SECONDS if the panel is
