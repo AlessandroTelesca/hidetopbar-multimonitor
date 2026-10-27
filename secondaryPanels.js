@@ -20,6 +20,7 @@
 // bar: intellihide on the panel's own monitor, pressure at the screen edge,
 // shown in the overview. Such a panel is recognised as a chrome actor named
 // "panelBox" directly in Main.uiGroup whose child carries a `monitorIndex`.
+// While a panel is hidden, hiddenClock.js shows its clock in its place.
 
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
@@ -31,6 +32,7 @@ import * as Layout from 'resource:///org/gnome/shell/ui/layout.js';
 
 import * as Convenience from './convenience.js';
 import * as Intellihide from './intellihide.js';
+import * as HiddenClock from './hiddenClock.js';
 const DEBUG = Convenience.DEBUG;
 
 const ShellActionMode = (
@@ -113,6 +115,8 @@ class SecondaryPanel {
         );
 
         setStruts(box, false);
+        // After setStruts(): the clock goes just below the re-added box.
+        this._clock = new HiddenClock.HiddenClock(box, panel);
         this._updateStaticBox();
         this._updatePressureBarrier();
         this._updateIntellihideStatus();
@@ -321,6 +325,7 @@ class SecondaryPanel {
 
     // `boxGone`: the owning extension is removing the panel itself.
     destroy(boxGone) {
+        this._clock.destroy();
         this._signalsHandler.destroy();
         this._intellihide.destroy();
         this._disablePressureBarrier();
