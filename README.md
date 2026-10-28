@@ -3,7 +3,7 @@
 Companion for [Hide Top Bar](https://extensions.gnome.org/extension/545/hide-top-bar/). Runs only while Hide Top Bar is active and uses its settings; Hide Top Bar itself stays unmodified.
 
 - Hides the panels Multi Monitors Bar adds on other monitors by the same rules (intellihide, edge pressure, overview).
-- While such a panel is hidden, shows its clock at the same spot, fading in as the panel slides away. Moving the pointer onto it hides it for 30 seconds. Restyle it via `.hidetopbar-mm-clock` in `stylesheet.css`.
+- While such a panel is hidden, shows its clock at the same spot, fading in as the panel slides away. It hides while the pointer is on it and comes back a second after the pointer leaves. Restyle it via `.hidetopbar-mm-clock` in `stylesheet.css`.
 - Keeps Dash to Dock visible when revealed over a maximized window (blocks direct scanout while it is shown).
 
 Install: copy this folder to `~/.local/share/gnome-shell/extensions/hidetopbar-multimonitor@alessandrot`, log out and in, enable it.

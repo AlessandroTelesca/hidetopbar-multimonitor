@@ -9,8 +9,8 @@
 
 // While a secondary panel is hidden, shows its clock where the panel's clock
 // sits. Fades in as the panel slides away: SecondaryPanel eases the box's
-// translation_y to ±height and then hides the box. Moving the pointer onto the
-// clock hides it for SNOOZE_SECONDS.
+// translation_y to ±height and then hides the box. The clock hides while the
+// pointer is on it, and comes back REVEAL_DELAY_MS after the pointer leaves.
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -22,7 +22,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import * as Convenience from './convenience.js';
 
-const SNOOZE_SECONDS = 30;
+const REVEAL_DELAY_MS = 1000;
 
 export class HiddenClock {
     constructor(box, panel) {
@@ -30,7 +30,10 @@ export class HiddenClock {
         this._source = null;
         this._ownSource = false;
         this._binding = null;
-        this._snoozeId = 0;
+        this._pointerHidden = false;
+        this._pointerId = 0;
+        this._revealId = 0;
+        this._cursorTracker = Convenience.getCursorTracker();
 
         this._label = new St.Label({style_class: 'hidetopbar-mm-clock'});
         this._clock = new St.Bin({
@@ -42,7 +45,7 @@ export class HiddenClock {
         // Not `hover`: turning non-reactive under the pointer leaves it set
         // (no leave event comes), so the next entry would not notify.
         this._clock.connect('enter-event', () => {
-            this._snooze();
+            this._hideUnderPointer();
             return Clutter.EVENT_PROPAGATE;
         });
         // A strip over the panel's band that centers the clock by layout, so
@@ -123,19 +126,59 @@ export class HiddenClock {
         this._clock.translation_x = Number.isFinite(offset) ? offset : 0;
     }
 
-    // Hides the clock; it comes back after SNOOZE_SECONDS if the panel is
-    // still hidden then. The clock is not reactive while hidden, so the
-    // pointer cannot restart the timer; if the pointer is still on it when the
-    // timer ends, it hides again at once.
-    _snooze() {
-        if (this._snoozeId)
+    // The hidden clock is not reactive, so the pointer reaches the window
+    // underneath and no leave event comes: follow the pointer instead.
+    _hideUnderPointer() {
+        if (this._pointerHidden)
             return;
-        this._snoozeId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
-            SNOOZE_SECONDS, () => {
-                this._snoozeId = 0;
-                this._updateOpacity();
+        this._pointerHidden = true;
+        this._pointerId = this._cursorTracker.connect('position-invalidated',
+            this._checkPointer.bind(this));
+        this._updateOpacity();
+    }
+
+    _pointerOnClock() {
+        const [px, py] = global.get_pointer();
+        const [x, y] = this._clock.get_transformed_position();
+        const [width, height] = this._clock.get_transformed_size();
+        return px >= x && px < x + width && py >= y && py < y + height;
+    }
+
+    // Back on the clock: keep waiting. Off it: reveal once it stays off.
+    _checkPointer() {
+        if (this._pointerOnClock()) {
+            this._cancelReveal();
+            return;
+        }
+        if (this._revealId)
+            return;
+        this._revealId = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
+            REVEAL_DELAY_MS, () => {
+                this._revealId = 0;
+                if (!this._pointerOnClock())
+                    this._stopHidingUnderPointer();
                 return GLib.SOURCE_REMOVE;
             });
+    }
+
+    _cancelReveal() {
+        if (this._revealId) {
+            GLib.source_remove(this._revealId);
+            this._revealId = 0;
+        }
+    }
+
+    _disconnectPointer() {
+        this._cancelReveal();
+        if (this._pointerId) {
+            this._cursorTracker.disconnect(this._pointerId);
+            this._pointerId = 0;
+        }
+    }
+
+    _stopHidingUnderPointer() {
+        this._disconnectPointer();
+        this._pointerHidden = false;
         this._updateOpacity();
     }
 
@@ -143,7 +186,7 @@ export class HiddenClock {
     _updateOpacity() {
         const box = this._box;
         let hidden;
-        if (this._snoozeId)
+        if (this._pointerHidden)
             hidden = 0;
         else if (!box.visible)
             hidden = 1;
@@ -173,10 +216,7 @@ export class HiddenClock {
     }
 
     destroy() {
-        if (this._snoozeId) {
-            GLib.source_remove(this._snoozeId);
-            this._snoozeId = 0;
-        }
+        this._disconnectPointer();
         this._dropSource();
         this._signalsHandler.destroy();
         Main.layoutManager.removeChrome(this._actor);
