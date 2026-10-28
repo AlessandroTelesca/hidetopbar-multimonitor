@@ -9,8 +9,8 @@
 
 // While a secondary panel is hidden, shows its clock where the panel's clock
 // sits. Fades in as the panel slides away: SecondaryPanel eases the box's
-// translation_y to ±height and then hides the box. A click on the clock
-// hides it for SNOOZE_SECONDS.
+// translation_y to ±height and then hides the box. Moving the pointer onto the
+// clock hides it for SNOOZE_SECONDS.
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -33,14 +33,18 @@ export class HiddenClock {
         this._snoozeId = 0;
 
         this._label = new St.Label({style_class: 'hidetopbar-mm-clock'});
-        this._button = new St.Button({
+        this._clock = new St.Bin({
             child: this._label,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
-            can_focus: false,
             reactive: false,
         });
-        this._button.connect('clicked', this._snooze.bind(this));
+        // Not `hover`: turning non-reactive under the pointer leaves it set
+        // (no leave event comes), so the next entry would not notify.
+        this._clock.connect('enter-event', () => {
+            this._snooze();
+            return Clutter.EVENT_PROPAGATE;
+        });
         // A strip over the panel's band that centers the clock by layout, so
         // nothing has to follow the clock's own size.
         this._actor = new St.Widget({
@@ -48,9 +52,9 @@ export class HiddenClock {
             reactive: false,
             opacity: 0,
         });
-        this._actor.add_child(this._button);
-        // Only the clock takes clicks, and only while it shows: elsewhere in
-        // the strip pointer events go to the windows underneath.
+        this._actor.add_child(this._clock);
+        // Only the clock takes the pointer, and only while it shows:
+        // elsewhere in the strip pointer events go to the windows underneath.
         Main.layoutManager.addChrome(this._actor, {trackFullscreen: true});
         // The panel slides over the clock as it comes back.
         Main.uiGroup.set_child_below_sibling(this._actor, box);
@@ -109,20 +113,23 @@ export class HiddenClock {
     _updateOffset() {
         const source = this._source;
         if (!this._ownSource || !(source?.width > 0)) {
-            this._button.translation_x = 0;
+            this._clock.translation_x = 0;
             return;
         }
         const [sourceX] = source.get_transformed_position();
         const center = this._box.x + this._box.width / 2;
         const offset = Math.round(sourceX + source.width / 2 - center);
         // NaN before the panel clock is on stage; its allocation comes later.
-        this._button.translation_x = Number.isFinite(offset) ? offset : 0;
+        this._clock.translation_x = Number.isFinite(offset) ? offset : 0;
     }
 
     // Hides the clock; it comes back after SNOOZE_SECONDS if the panel is
-    // still hidden then. The clock is not reactive while hidden, so a second
-    // click cannot restart the timer.
+    // still hidden then. The clock is not reactive while hidden, so the
+    // pointer cannot restart the timer; if the pointer is still on it when the
+    // timer ends, it hides again at once.
     _snooze() {
+        if (this._snoozeId)
+            return;
         this._snoozeId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
             SNOOZE_SECONDS, () => {
                 this._snoozeId = 0;
@@ -146,11 +153,11 @@ export class HiddenClock {
             hidden = 0;
         this._actor.opacity = Math.round(hidden * 255);
         const reactive = this._actor.opacity > 0;
-        if (this._button.reactive !== reactive) {
-            this._button.reactive = reactive;
+        if (this._clock.reactive !== reactive) {
+            this._clock.reactive = reactive;
             // Clutter only re-picks the actor under the pointer after a
-            // relayout: without one, a clock that comes back while the panel
-            // stays hidden never gets the pointer and ignores clicks.
+            // relayout: without one, a clock that comes back under a resting
+            // pointer would not notice it.
             this._actor.queue_relayout();
         }
     }
