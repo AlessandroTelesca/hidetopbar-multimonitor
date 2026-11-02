@@ -8,14 +8,15 @@
  */
 
 // While a secondary panel is hidden, shows its clock where the panel's clock
-// sits, on a tab that grows out of the screen edge the panel hides behind.
-// Fades in as the panel slides away: SecondaryPanel eases the box's
-// translation_y to ±height and then hides the box. The clock hides while the
-// pointer is on it, and comes back REVEAL_DELAY_MS after the pointer leaves.
+// sits, without seconds, on a tab that grows out of the screen edge the panel
+// hides behind. It shows only while the panel is hidden, fading in as the
+// panel slides away (SecondaryPanel eases the box's translation_y to ±height
+// and then hides the box), and hides in two cases: while the panel is not
+// hidden, and while the pointer is on it, coming back REVEAL_DELAY_MS after
+// the pointer leaves.
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
-import GObject from 'gi://GObject';
 import Pango from 'gi://Pango';
 import St from 'gi://St';
 
@@ -24,6 +25,9 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Convenience from './convenience.js';
 
 const REVEAL_DELAY_MS = 1000;
+// The seconds of a time such as 8:12:34 PM or 20.12.34, which the panel's clock
+// shows when GNOME's "show seconds" is on.
+const SECONDS = /(\d{1,2}([:.\u2236])\d{2})\2\d{2}(?!\d)/g;
 // How far the tab's corners at the screen edge curve outward into it, px.
 const EDGE_FLARE = 12;
 // The tab's colour, which the label's text is drawn on.
@@ -43,7 +47,6 @@ export class HiddenClock {
         this._atBottom = false;
         this._source = null;
         this._ownSource = false;
-        this._binding = null;
         this._pointerHidden = false;
         this._pointerId = 0;
         this._revealId = 0;
@@ -85,37 +88,24 @@ export class HiddenClock {
         this._actor.add_child(this._clock);
         // Only the clock takes the pointer, and only while it shows:
         // elsewhere in the strip pointer events go to the windows underneath.
-        // Not trackFullscreen: the layout manager places that chrome on a
-        // monitor by where it is drawn, and a strip hidden before its first
-        // layout stays at 0,0, on the primary monitor, so a fullscreen window
-        // there would keep it hidden. The panel's monitor is known instead.
+        // Not trackFullscreen: whether the clock shows depends on its panel
+        // alone, fullscreen window or not.
         Main.layoutManager.addChrome(this._actor);
         // The panel slides over the clock as it comes back.
         Main.uiGroup.set_child_below_sibling(this._actor, box);
 
         this._signalsHandler = new Convenience.GlobalSignalsHandler();
         this._signalsHandler.add(
-            [box, 'notify::translation-y', this._updateOpacity.bind(this)],
-            [box, 'notify::visible', this._updateOpacity.bind(this)],
+            [box, 'notify::translation-y', this._updateShown.bind(this)],
+            [box, 'notify::visible', this._updateShown.bind(this)],
             // The allocation ignores the slide, so this only fires when the
             // panel is moved or resized.
             [box, 'notify::allocation', this._updateGeometry.bind(this)],
-            [global.display, 'in-fullscreen-changed', this._updateVisible.bind(this)],
-            [Main.overview, 'showing', this._updateVisible.bind(this)],
-            [Main.overview, 'hidden', this._updateVisible.bind(this)],
         );
 
         this._setSource(panel.statusArea?.dateMenu?._clockDisplay ?? null);
         this._updateGeometry();
-        this._updateOpacity();
-        this._updateVisible();
-    }
-
-    // Hidden over a fullscreen window on the panel's monitor, as the layout
-    // manager hides chrome, except in the overview, where windows are not shown.
-    _updateVisible() {
-        const monitor = Main.layoutManager.monitors[this._monitorIndex];
-        this._actor.visible = !(monitor?.inFullscreen && !Main.overview.visible);
+        this._updateShown();
     }
 
     // `own`: the panel's own clock label; without it, the top bar's clock
@@ -124,9 +114,8 @@ export class HiddenClock {
         this._dropSource();
         this._ownSource = !!own;
         this._source = own ?? Main.panel.statusArea.dateMenu._clockDisplay;
-        this._binding = this._source.bind_property('text', this._label, 'text',
-            GObject.BindingFlags.SYNC_CREATE);
         this._signalsHandler.addWithLabel('source',
+            [this._source, 'notify::text', this._updateText.bind(this)],
             [this._source, 'style-changed', this._updateFont.bind(this)],
             [this._source, 'notify::allocation', this._updateOffset.bind(this)],
             [this._source, 'destroy', () => {
@@ -136,15 +125,18 @@ export class HiddenClock {
                     this._dropSource();
             }],
         );
+        this._updateText();
         this._updateFont();
         this._updateOffset();
     }
 
     _dropSource() {
         this._signalsHandler.disconnectWithLabel('source');
-        this._binding?.unbind();
-        this._binding = null;
         this._source = null;
+    }
+
+    _updateText() {
+        this._label.text = (this._source?.text ?? '').replace(SECONDS, '$1');
     }
 
     _updateGeometry() {
@@ -214,7 +206,7 @@ export class HiddenClock {
         this._pointerHidden = true;
         this._pointerId = this._cursorTracker.connect('position-invalidated',
             this._checkPointer.bind(this));
-        this._updateOpacity();
+        this._updateShown();
     }
 
     _pointerOnClock() {
@@ -259,22 +251,23 @@ export class HiddenClock {
     _stopHidingUnderPointer() {
         this._disconnectPointer();
         this._pointerHidden = false;
-        this._updateOpacity();
+        this._updateShown();
     }
 
-    // Opacity only: _updateVisible() owns `visible`.
-    _updateOpacity() {
+    // How far the panel is hidden, 0 (shown) to 1 (hidden): 1 once the box is
+    // hidden, and along the way while it slides.
+    _panelHidden() {
         const box = this._box;
-        let hidden;
-        if (this._pointerHidden)
-            hidden = 0;
-        else if (!box.visible)
-            hidden = 1;
-        else if (box.height > 0)
-            hidden = Math.min(1, Math.abs(box.translation_y) / box.height);
-        else
-            hidden = 0;
-        this._actor.opacity = Math.round(hidden * 255);
+        if (!box.visible)
+            return 1;
+        return box.height > 0 ? Math.min(1, Math.abs(box.translation_y) / box.height) : 0;
+    }
+
+    // Shown only while the panel is hidden; hidden while it is not, and while
+    // the pointer is on the clock.
+    _updateShown() {
+        const shown = this._pointerHidden ? 0 : this._panelHidden();
+        this._actor.opacity = Math.round(shown * 255);
         const reactive = this._actor.opacity > 0;
         if (this._clock.reactive !== reactive) {
             this._clock.reactive = reactive;
