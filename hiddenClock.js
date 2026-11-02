@@ -8,7 +8,8 @@
  */
 
 // While a secondary panel is hidden, shows its clock where the panel's clock
-// sits. Fades in as the panel slides away: SecondaryPanel eases the box's
+// sits, on a tab that grows out of the screen edge the panel hides behind.
+// Fades in as the panel slides away: SecondaryPanel eases the box's
 // translation_y to ±height and then hides the box. The clock hides while the
 // pointer is on it, and comes back REVEAL_DELAY_MS after the pointer leaves.
 
@@ -23,10 +24,16 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as Convenience from './convenience.js';
 
 const REVEAL_DELAY_MS = 1000;
+// How far the tab's corners at the screen edge curve outward into it, px.
+const EDGE_FLARE = 12;
+// The tab's colour, which the label's text is drawn on.
+const TAB_RGBA = [0, 0, 0, 0.55];
 
 export class HiddenClock {
     constructor(box, panel) {
         this._box = box;
+        this._monitorIndex = panel.monitorIndex;
+        this._atBottom = false;
         this._source = null;
         this._ownSource = false;
         this._binding = null;
@@ -35,21 +42,25 @@ export class HiddenClock {
         this._revealId = 0;
         this._cursorTracker = Convenience.getCursorTracker();
 
+        // The label's padding leaves room for the tab's flares on its sides.
         this._label = new St.Label({style_class: 'hidetopbar-mm-clock'});
-        this._clock = new St.Bin({
-            child: this._label,
+        this._tab = new St.DrawingArea({x_expand: true, y_expand: true});
+        this._tab.connect('repaint', this._drawTab.bind(this));
+        this._clock = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
             x_align: Clutter.ActorAlign.CENTER,
-            y_align: Clutter.ActorAlign.CENTER,
             reactive: false,
         });
+        this._clock.add_child(this._tab);
+        this._clock.add_child(this._label);
         // Not `hover`: turning non-reactive under the pointer leaves it set
         // (no leave event comes), so the next entry would not notify.
         this._clock.connect('enter-event', () => {
             this._hideUnderPointer();
             return Clutter.EVENT_PROPAGATE;
         });
-        // A strip over the panel's band that centers the clock by layout, so
-        // nothing has to follow the clock's own size.
+        // A strip across the panel's band, as tall as the clock and against the
+        // screen edge, that centers the clock by layout.
         this._actor = new St.Widget({
             layout_manager: new Clutter.BinLayout(),
             reactive: false,
@@ -58,7 +69,11 @@ export class HiddenClock {
         this._actor.add_child(this._clock);
         // Only the clock takes the pointer, and only while it shows:
         // elsewhere in the strip pointer events go to the windows underneath.
-        Main.layoutManager.addChrome(this._actor, {trackFullscreen: true});
+        // Not trackFullscreen: the layout manager places that chrome on a
+        // monitor by where it is drawn, and a strip hidden before its first
+        // layout stays at 0,0, on the primary monitor, so a fullscreen window
+        // there would keep it hidden. The panel's monitor is known instead.
+        Main.layoutManager.addChrome(this._actor);
         // The panel slides over the clock as it comes back.
         Main.uiGroup.set_child_below_sibling(this._actor, box);
 
@@ -69,11 +84,22 @@ export class HiddenClock {
             // The allocation ignores the slide, so this only fires when the
             // panel is moved or resized.
             [box, 'notify::allocation', this._updateGeometry.bind(this)],
+            [global.display, 'in-fullscreen-changed', this._updateVisible.bind(this)],
+            [Main.overview, 'showing', this._updateVisible.bind(this)],
+            [Main.overview, 'hidden', this._updateVisible.bind(this)],
         );
 
         this._setSource(panel.statusArea?.dateMenu?._clockDisplay ?? null);
         this._updateGeometry();
         this._updateOpacity();
+        this._updateVisible();
+    }
+
+    // Hidden over a fullscreen window on the panel's monitor, as the layout
+    // manager hides chrome, except in the overview, where windows are not shown.
+    _updateVisible() {
+        const monitor = Main.layoutManager.monitors[this._monitorIndex];
+        this._actor.visible = !(monitor?.inFullscreen && !Main.overview.visible);
     }
 
     // `own`: the panel's own clock label; without it, the top bar's clock
@@ -107,9 +133,43 @@ export class HiddenClock {
 
     _updateGeometry() {
         const {x, y, width, height} = this._box;
-        this._actor.set_position(x, y);
-        this._actor.set_size(width, height);
+        // A panel at the bottom of its monitor hides behind the bottom edge.
+        const monitor = Main.layoutManager.monitors[this._monitorIndex];
+        this._atBottom = !!monitor && y + height / 2 > monitor.y + monitor.height / 2;
+        const [, clockHeight] = this._clock.get_preferred_height(width);
+        const h = Math.min(Math.round(clockHeight), height) || height;
+        this._actor.set_position(x, this._atBottom ? y + height - h : y);
+        this._actor.set_size(width, h);
+        this._tab.queue_repaint();
         this._updateOffset();
+    }
+
+    // The tab: flush with the screen edge, which its corners there curve out
+    // into, and rounded off at its other end. Drawn for the top edge and
+    // flipped for the bottom one.
+    _drawTab(area) {
+        const cr = area.get_context();
+        const [w, h] = area.get_surface_size();
+        const scale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
+        const f = Math.min(EDGE_FLARE * scale, w / 4, h / 2);
+        const r = Math.max(Math.min(h / 2, h - f, w / 2 - f), 0);
+        if (this._atBottom) {
+            cr.translate(0, h);
+            cr.scale(1, -1);
+        }
+        cr.moveTo(0, 0);
+        cr.lineTo(w, 0);
+        cr.arcNegative(w, f, f, -Math.PI / 2, Math.PI);
+        cr.lineTo(w - f, h - r);
+        cr.arc(w - f - r, h - r, r, 0, Math.PI / 2);
+        cr.lineTo(f + r, h);
+        cr.arc(f + r, h - r, r, Math.PI / 2, Math.PI);
+        cr.lineTo(f, f);
+        cr.arcNegative(0, f, f, 0, -Math.PI / 2);
+        cr.closePath();
+        cr.setSourceRGBA(...TAB_RGBA);
+        cr.fill();
+        cr.$dispose();
     }
 
     // Shift the clock from the strip's center to the panel clock's center.
@@ -182,7 +242,7 @@ export class HiddenClock {
         this._updateOpacity();
     }
 
-    // Opacity only: the layout manager owns `visible` of trackFullscreen chrome.
+    // Opacity only: _updateVisible() owns `visible`.
     _updateOpacity() {
         const box = this._box;
         let hidden;
@@ -213,6 +273,8 @@ export class HiddenClock {
         this._label.style = `font-family: "${font.get_family()}"; ` +
             `font-size: ${font.get_size() / Pango.SCALE}${unit}; ` +
             `font-weight: ${font.get_weight()};`;
+        // The strip follows the clock's height.
+        this._updateGeometry();
     }
 
     destroy() {
