@@ -28,6 +28,13 @@ const REVEAL_DELAY_MS = 1000;
 const EDGE_FLARE = 12;
 // The tab's colour, which the label's text is drawn on.
 const TAB_RGBA = [0, 0, 0, 0.55];
+// Set on the clock by an extension that draws the tab itself (Liquid Glass's
+// glass); the tab is then left unpainted. That extension finds the clocks as
+// the uiGroup children named CLOCK_NAME and draws over the actor named
+// BODY_NAME inside each, the tab without its flares.
+const BACKED_CLASS = 'liquid-glass-backed';
+const CLOCK_NAME = 'hidetopbar-mm-clock';
+const BODY_NAME = 'hidetopbar-mm-clock-body';
 
 export class HiddenClock {
     constructor(box, panel) {
@@ -46,11 +53,19 @@ export class HiddenClock {
         this._label = new St.Label({style_class: 'hidetopbar-mm-clock'});
         this._tab = new St.DrawingArea({x_expand: true, y_expand: true});
         this._tab.connect('repaint', this._drawTab.bind(this));
+        this._body = new St.Widget({
+            name: BODY_NAME,
+            x_expand: true,
+            y_expand: true,
+            style: `margin: 0 ${EDGE_FLARE}px;`,
+        });
         this._clock = new St.Widget({
             layout_manager: new Clutter.BinLayout(),
             x_align: Clutter.ActorAlign.CENTER,
             reactive: false,
         });
+        this._clock.connect('style-changed', () => this._tab.queue_repaint());
+        this._clock.add_child(this._body);
         this._clock.add_child(this._tab);
         this._clock.add_child(this._label);
         // Not `hover`: turning non-reactive under the pointer leaves it set
@@ -62,6 +77,7 @@ export class HiddenClock {
         // A strip across the panel's band, as tall as the clock and against the
         // screen edge, that centers the clock by layout.
         this._actor = new St.Widget({
+            name: CLOCK_NAME,
             layout_manager: new Clutter.BinLayout(),
             reactive: false,
             opacity: 0,
@@ -149,6 +165,10 @@ export class HiddenClock {
     // flipped for the bottom one.
     _drawTab(area) {
         const cr = area.get_context();
+        if (this._clock.has_style_class_name(BACKED_CLASS)) {
+            cr.$dispose();
+            return;
+        }
         const [w, h] = area.get_surface_size();
         const scale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
         const f = Math.min(EDGE_FLARE * scale, w / 4, h / 2);
