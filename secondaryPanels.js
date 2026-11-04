@@ -211,7 +211,7 @@ class SecondaryPanel {
     _handleMenus() {
         if (Main.overview.visible || this._blockerMenu)
             return;
-        const blocker = this._panel.menuManager?.activeMenu ?? null;
+        const blocker = this._openMenu();
         if (!blocker) {
             this.hide(
                 this._settings.get_double('animation-time-autohide'),
@@ -225,6 +225,19 @@ class SecondaryPanel {
             this._disconnectBlockerMenu();
             this._handleMenus();
         });
+    }
+
+    // The open menu that holds this panel up: one of its own, or a top bar
+    // menu shown from one of its buttons. Multi Monitors Bar's mirrored
+    // buttons (quick settings among them) open the top bar's menu, which
+    // the top bar's manager owns, anchored to the mirror.
+    _openMenu() {
+        const own = this._panel.menuManager?.activeMenu;
+        if (own)
+            return own;
+        const main = Main.panel.menuManager.activeMenu;
+        const source = main?.sourceActor;
+        return source && this._panel.contains(source) ? main : null;
     }
 
     _disconnectBlockerMenu() {
