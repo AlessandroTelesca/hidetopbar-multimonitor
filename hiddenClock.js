@@ -7,13 +7,13 @@
  * (at your option) any later version.
  */
 
-// While a secondary panel is hidden, shows its clock where the panel's clock
-// sits, without seconds, on a tab that grows out of the screen edge the panel
-// hides behind. It shows only while the panel is hidden, fading in as the
-// panel slides away (SecondaryPanel eases the box's translation_y to ±height
-// and then hides the box), and hides in two cases: while the panel is not
-// hidden, and while the pointer is on it, coming back REVEAL_DELAY_MS after
-// the pointer leaves.
+// Keeps a secondary panel's clock on screen where the panel's clock sits,
+// without seconds, on a tab that grows out of the screen edge the panel hides
+// behind. It is stacked just below the panel, which slides over it and away
+// again: nothing about the panel, intellihide, the overview or fullscreen
+// windows changes whether it shows. The only thing that hides it is the
+// pointer being on it, and it comes back REVEAL_DELAY_MS after the pointer
+// leaves.
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -50,6 +50,7 @@ export class HiddenClock {
         this._pointerHidden = false;
         this._pointerId = 0;
         this._revealId = 0;
+        this._unredirectDisabled = false;
         this._cursorTracker = Convenience.getCursorTracker();
 
         // The label's padding leaves room for the tab's flares on its sides.
@@ -65,7 +66,7 @@ export class HiddenClock {
         this._clock = new St.Widget({
             layout_manager: new Clutter.BinLayout(),
             x_align: Clutter.ActorAlign.CENTER,
-            reactive: false,
+            reactive: true,
         });
         this._clock.connect('style-changed', () => this._tab.queue_repaint());
         this._clock.add_child(this._body);
@@ -83,29 +84,34 @@ export class HiddenClock {
             name: CLOCK_NAME,
             layout_manager: new Clutter.BinLayout(),
             reactive: false,
-            opacity: 0,
         });
         this._actor.add_child(this._clock);
         // Only the clock takes the pointer, and only while it shows:
         // elsewhere in the strip pointer events go to the windows underneath.
-        // Not trackFullscreen: whether the clock shows depends on its panel
-        // alone, fullscreen window or not.
+        // Not trackFullscreen: the clock stays above fullscreen windows too.
         Main.layoutManager.addChrome(this._actor);
         // The panel slides over the clock as it comes back.
         Main.uiGroup.set_child_below_sibling(this._actor, box);
 
+        const updateUnredirect = this._updateUnredirect.bind(this);
         this._signalsHandler = new Convenience.GlobalSignalsHandler();
         this._signalsHandler.add(
-            [box, 'notify::translation-y', this._updateShown.bind(this)],
-            [box, 'notify::visible', this._updateShown.bind(this)],
             // The allocation ignores the slide, so this only fires when the
             // panel is moved or resized.
             [box, 'notify::allocation', this._updateGeometry.bind(this)],
+            // What can change whether a window covers the clock's monitor.
+            [global.display, 'restacked', updateUnredirect],
+            [global.display, 'window-entered-monitor', updateUnredirect],
+            [global.display, 'window-left-monitor', updateUnredirect],
+            [global.window_manager, 'size-changed', updateUnredirect],
+            [global.window_manager, 'minimize', updateUnredirect],
+            [global.window_manager, 'unminimize', updateUnredirect],
+            [global.workspace_manager, 'active-workspace-changed', updateUnredirect],
         );
 
         this._setSource(panel.statusArea?.dateMenu?._clockDisplay ?? null);
         this._updateGeometry();
-        this._updateShown();
+        this._updateUnredirect();
     }
 
     // `own`: the panel's own clock label; without it, the top bar's clock
@@ -206,7 +212,9 @@ export class HiddenClock {
         this._pointerHidden = true;
         this._pointerId = this._cursorTracker.connect('position-invalidated',
             this._checkPointer.bind(this));
-        this._updateShown();
+        this._clock.reactive = false;
+        this._actor.opacity = 0;
+        this._updateUnredirect();
     }
 
     _pointerOnClock() {
@@ -251,31 +259,43 @@ export class HiddenClock {
     _stopHidingUnderPointer() {
         this._disconnectPointer();
         this._pointerHidden = false;
-        this._updateShown();
+        this._actor.opacity = 255;
+        this._clock.reactive = true;
+        // Clutter only re-picks the actor under the pointer after a relayout:
+        // without one, a clock that comes back under a resting pointer would
+        // not notice it.
+        this._actor.queue_relayout();
+        this._updateUnredirect();
     }
 
-    // How far the panel is hidden, 0 (shown) to 1 (hidden): 1 once the box is
-    // hidden, and along the way while it slides.
-    _panelHidden() {
-        const box = this._box;
-        if (!box.visible)
-            return 1;
-        return box.height > 0 ? Math.min(1, Math.abs(box.translation_y) / box.height) : 0;
+    // Whether a window fills the clock's monitor, which only then can be put
+    // on a direct-scanout plane. Without the panel's strut a maximized window
+    // does, not just a fullscreen one.
+    _windowCoversMonitor() {
+        const monitor = Main.layoutManager.monitors[this._monitorIndex];
+        if (!monitor)
+            return false;
+        const workspace = global.workspace_manager.get_active_workspace();
+        return global.get_window_actors().some(({meta_window: window}) => {
+            if (window.minimized || window.get_monitor() !== this._monitorIndex ||
+                !window.located_on_workspace(workspace))
+                return false;
+            const {x, y, width, height} = window.get_frame_rect();
+            return x <= monitor.x && y <= monitor.y &&
+                x + width >= monitor.x + monitor.width &&
+                y + height >= monitor.y + monitor.height;
+        });
     }
 
-    // Shown only while the panel is hidden; hidden while it is not, and while
-    // the pointer is on the clock.
-    _updateShown() {
-        const shown = this._pointerHidden ? 0 : this._panelHidden();
-        this._actor.opacity = Math.round(shown * 255);
-        const reactive = this._actor.opacity > 0;
-        if (this._clock.reactive !== reactive) {
-            this._clock.reactive = reactive;
-            // Clutter only re-picks the actor under the pointer after a
-            // relayout: without one, a clock that comes back under a resting
-            // pointer would not notice it.
-            this._actor.queue_relayout();
-        }
+    // A window on a direct-scanout plane would leave the stage unpainted, and
+    // the clock with it. The panel only holds that off while it is up. Mutter's
+    // switch is global, so this is held only while the clock needs it.
+    _updateUnredirect() {
+        const disable = !this._pointerHidden && this._windowCoversMonitor();
+        if (disable === this._unredirectDisabled)
+            return;
+        Convenience.setUnredirect(!disable);
+        this._unredirectDisabled = disable;
     }
 
     _updateFont() {
@@ -294,6 +314,10 @@ export class HiddenClock {
         this._disconnectPointer();
         this._dropSource();
         this._signalsHandler.destroy();
+        if (this._unredirectDisabled) {
+            Convenience.setUnredirect(true);
+            this._unredirectDisabled = false;
+        }
         Main.layoutManager.removeChrome(this._actor);
         this._actor.destroy();
     }

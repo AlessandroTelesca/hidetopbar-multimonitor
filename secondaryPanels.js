@@ -20,7 +20,7 @@
 // bar: intellihide on the panel's own monitor, pressure at the screen edge,
 // shown in the overview. Such a panel is recognised as a chrome actor named
 // "panelBox" directly in Main.uiGroup whose child carries a `monitorIndex`.
-// While a panel is hidden, hiddenClock.js shows its clock in its place.
+// hiddenClock.js keeps its clock on screen below it.
 
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
